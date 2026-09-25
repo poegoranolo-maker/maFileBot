@@ -2074,7 +2074,11 @@ def create_dispatcher(shop, storage):
             return
         await callback.message.bot.send_message(
             chat_id=callback.message.chat.id,
-            text=f"{tr('code_result', lang)}:\n<code>{steam_code}</code>\n\nℹ️ {tr('code_login_retry', lang)}",
+            text=(
+                f"{tr('code_result', lang)}:\n<code>{steam_code}</code>"
+                f"\n\n⏱ {tr('code_validity', lang)}"
+                f"\n\nℹ️ {tr('code_login_retry', lang)}"
+            ),
             reply_markup=keyboard(
                 [[("📋 Копіювати код" if lang == "ua" else "📋 Копировать код", "copy:" + steam_code)]]
             ),

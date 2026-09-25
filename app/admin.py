@@ -384,7 +384,8 @@ def admin_router():
             text=(
                 "🔑 <b>Steam Guard</b>\n\n"
                 f"👤 {escape(authenticator.account_name)}\n"
-                f"🔐 <code>{code}</code>"
+                f"🔐 <code>{code}</code>\n\n"
+                "⏱ Код буде активний лише протягом 30 секунд."
             ),
             reply_markup=keyboard([[('📋 Копіювати код', 'copy:' + code)]]),
             parse_mode="HTML",

@@ -9,7 +9,7 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 if [[ ! -f compose.yaml || ! -f .env.example ]]; then
-  echo "Run this script from the SteamSell project directory."
+  echo "Run this script from the maFileBot project directory."
   exit 1
 fi
 
@@ -30,7 +30,7 @@ fi
 
 echo
 echo "Edit .env now and set at least: BOT_TOKEN, ADMIN_ID, MONO_TOKEN, SUPPORT_USERNAME."
-echo "For card payment also set MANUAL_CARD. It can run without a domain."
-echo "For Gmail OAuth set PUBLIC_BASE_URL and Google values."
-echo "Then start the bot with: docker compose up -d --build"
+echo "For card payment also set MANUAL_CARD."
+echo "For Monobank acquiring set PUBLIC_BASE_URL to the customer's HTTPS domain."
+echo "Then start the bot with: bash deploy/start.sh"
 echo "Check it with: docker compose ps && docker compose logs --tail=100 app"
