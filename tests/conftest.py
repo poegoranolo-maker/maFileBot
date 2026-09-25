@@ -5,7 +5,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.db import database
-from app.models import Base, Order, Product, User
+from app.models import Base, Order, Product, SteamAuthenticator, User
 from app.security import Vault
 from app.services import Shop
 
@@ -25,12 +25,26 @@ async def shop(tmp_path):
         page_size=7,
         timezone="Europe/Kyiv",
     )
-    mono, gmail, redis = AsyncMock(), AsyncMock(), AsyncMock()
+    mono, redis = AsyncMock(), AsyncMock()
     redis.eval.return_value = 1
-    service = Shop(cfg, sessions, vault, mono, gmail, redis)
+    service = Shop(cfg, sessions, vault, mono, redis)
     async with sessions() as session, session.begin():
         session.add_all(
             [User(id=1, language="ua", first_name="Buyer"), User(id=2, language="ru", first_name="Other")]
+        )
+        session.add_all(
+            [
+                SteamAuthenticator(
+                    id=1,
+                    account_name="new_login",
+                    shared_secret_encrypted=vault.encrypt("MDEyMzQ1Njc4OTAxMjM0NTY3ODk="),
+                ),
+                SteamAuthenticator(
+                    id=2,
+                    account_name="login",
+                    shared_secret_encrypted=vault.encrypt("MDEyMzQ1Njc4OTAxMjM0NTY3ODk="),
+                ),
+            ]
         )
         session.add(
             Product(
@@ -40,9 +54,6 @@ async def shop(tmp_path):
                 price=49900,
                 steam_login_encrypted=vault.encrypt("test_account"),
                 steam_password_encrypted=vault.encrypt("password<&>"),
-                gmail_credentials_encrypted=vault.pack(
-                    {"refresh_token": "secret", "email": "test@gmail.com"}
-                ),
             )
         )
         await session.flush()

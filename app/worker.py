@@ -11,12 +11,7 @@ from sqlalchemy import select
 from app.access import all_admin_ids, is_admin
 from app.i18n import money, tr
 from app.models import Broadcast, Order, Product, PromoCode, User, now
-from app.services import (
-    aware,
-    cleanup_expired_promo_codes,
-    code_request_window_open,
-    setting,
-)
+from app.services import aware, cleanup_expired_promo_codes, code_request_window_open, setting
 from app.ui import (
     back,
     keyboard,
@@ -67,20 +62,14 @@ async def deliver_one(shop, bot):
             text = manual_delivery_text(order, lang)
             markup = keyboard([[(tr("support", lang), "https://t.me/" + support.lstrip("@"))]])
         else:
-            gmail_connected = bool(
-                product.code_limit > 0
-                and (product.gmail_mailbox_id or product.gmail_credentials_encrypted)
-                and code_request_window_open(order)
-            )
             text = purchase_text(order, product, lang, shop.vault)
             markup = keyboard(
                 purchase_rows(
                     order,
                     lang,
                     support,
-                    gmail_connected,
+                    bool(product.steam_authenticator_id and code_request_window_open(order)),
                     product.code_limit,
-                    code_request_available=code_request_window_open(order),
                     return_target=f"purchase:{order.id}",
                 )
             )

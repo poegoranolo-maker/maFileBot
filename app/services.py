@@ -8,12 +8,6 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, func, select, update
 
-from app.mailboxes import (
-    credentials_for_product,
-    effective_code_limit,
-    mailbox_for_product,
-    mailbox_search_settings,
-)
 from app.models import (
     AdminLog,
     CartItem,
@@ -27,17 +21,19 @@ from app.models import (
     PromoCode,
     Referral,
     Setting,
+    SteamAuthenticator,
     User,
     now,
 )
+from app.steam_guard import generate_steam_guard_code
 
 log = logging.getLogger(__name__)
 SUCCESS = ("paid", "delivered")
 TIP_PERCENTS = (0, 15, 35, 50, 100)
 SALE_DISCOUNT_PERCENT = 50
-CODE_REQUEST_WINDOW = timedelta(days=180)
 PAYMENT_AMOUNT_TOLERANCE_KOPECKS = 500  # ±5 UAH
-CODE_SEARCH_COOLDOWN_SECONDS = 30
+CODE_REQUEST_WINDOW = timedelta(days=180)
+CODE_REQUEST_COOLDOWN_SECONDS = 30
 REWARD_PROMO_LIFETIME = timedelta(days=14)
 REWARD_PROMO_MAX_PRICE = 5_000
 CART_REWARD_MIN_TOTAL = 14_700
@@ -59,10 +55,7 @@ def aware(value):
 
 
 def code_request_window_open(order, current=None):
-    """Steam Guard codes can be requested for 180 days after payment."""
-    if not order.paid_at:
-        return False
-    return aware(order.paid_at) + CODE_REQUEST_WINDOW >= (current or now())
+    return bool(order.paid_at and aware(order.paid_at) + CODE_REQUEST_WINDOW >= (current or now()))
 
 
 async def setting(session, key, default=""):
@@ -395,9 +388,9 @@ async def release_stock(session, product_id):
 
 
 class Shop:
-    def __init__(self, cfg, sessions, vault, mono, gmail, redis):
+    def __init__(self, cfg, sessions, vault, mono, redis):
         self.cfg, self.sessions, self.vault = cfg, sessions, vault
-        self.mono, self.gmail, self.redis = mono, gmail, redis
+        self.mono, self.redis = mono, redis
 
     async def checkout(self, user_id, product_id, payment_choice=None, tip_percent=0, promo_code=None):
         if tip_percent not in TIP_PERCENTS:
@@ -836,22 +829,22 @@ class Shop:
     async def code(self, user_id, order_id):
         async with self.sessions() as session:
             order = await session.get(Order, order_id)
-            if not order or order.user_id != user_id or order.status not in SUCCESS:
-                raise ShopError("missing")
-            if not code_request_window_open(order):
+            if (
+                not order
+                or order.user_id != user_id
+                or order.status not in SUCCESS
+                or not code_request_window_open(order)
+            ):
                 raise ShopError("missing")
             product = await session.get(Product, order.product_id)
-            search_settings = mailbox_search_settings(await mailbox_for_product(session, product))
-            code_limit = await effective_code_limit(session, product)
-            found_count = await session.scalar(
+            if not product or not product.steam_authenticator_id or product.code_limit <= 0:
+                raise ShopError("missing")
+            used = await session.scalar(
                 select(func.count())
                 .select_from(MailCodeRequest)
-                .where(
-                    MailCodeRequest.order_id == order.id,
-                    MailCodeRequest.outcome == "found",
-                )
+                .where(MailCodeRequest.order_id == order.id, MailCodeRequest.outcome == "found")
             )
-            if found_count >= code_limit:
+            if used >= product.code_limit:
                 raise ShopError("code_limit")
             request = MailCodeRequest(
                 user_id=user_id,
@@ -860,91 +853,34 @@ class Shop:
                 outcome="requested",
             )
             session.add(request)
-            # Atomic cross-process throttle, both per user and per shared Steam account.
             allowed = await self.redis.eval(
-                "if redis.call('EXISTS',KEYS[1])==1 or redis.call('EXISTS',KEYS[2])==1 then return 0 end "
-                "redis.call('SET',KEYS[1],'1','EX',ARGV[1]); redis.call('SET',KEYS[2],'1','EX',ARGV[1]); return 1",
-                2,
+                "if redis.call('EXISTS',KEYS[1])==1 then return 0 end "
+                "redis.call('SET',KEYS[1],'1','EX',ARGV[1]); return 1",
+                1,
                 f"code:user:{user_id}",
-                f"code:product:{product.id}",
-                CODE_SEARCH_COOLDOWN_SECONDS,
+                CODE_REQUEST_COOLDOWN_SECONDS,
             )
             if not allowed:
                 request.outcome = "throttled"
                 await session.commit()
                 raise ShopError("cooldown")
-            count = await session.scalar(
-                select(func.count())
-                .select_from(MailCodeRequest)
-                .where(
-                    MailCodeRequest.user_id == user_id,
-                    MailCodeRequest.created_at > now() - timedelta(minutes=10),
-                    MailCodeRequest.outcome != "throttled",
-                )
-            )
-            if count > 10:
-                request.outcome = "throttled"
+            authenticator = await session.get(SteamAuthenticator, product.steam_authenticator_id)
+            if not authenticator:
+                request.outcome = "error"
                 await session.commit()
-                raise ShopError("cooldown")
+                raise ShopError("error")
             try:
-                credentials = await credentials_for_product(session, product, self.vault)
-                if not credentials:
-                    raise ValueError("gmail_not_connected")
-                # Keep the login match strict and use this mailbox's configured
-                # search window for both buyer and administrator lookups.
-                earliest = max(
-                    now() - timedelta(minutes=search_settings["max_age_minutes"]),
-                    aware(order.paid_at),
+                code = generate_steam_guard_code(
+                    self.vault.decrypt(authenticator.shared_secret_encrypted)
                 )
-                result = await self.gmail.latest_code(
-                    credentials,
-                    self.vault.decrypt(product.steam_login_encrypted),
-                    earliest,
-                    search_settings,
-                )
-                if result:
-                    code, message_id = result
-                    seen = await session.scalar(
-                        select(MailCodeRequest.id).where(
-                            MailCodeRequest.user_id == user_id,
-                            MailCodeRequest.order_id == order.id,
-                            MailCodeRequest.message_id == message_id,
-                            MailCodeRequest.outcome == "found",
-                        )
-                    )
-                    if not seen:
-                        request.outcome, request.message_id = "found", message_id
-                        await session.commit()
-                        return code, False
-                    # Steam can resend the same code email slowly. If no new
-                    # message appeared, offer the most recent code from the
-                    # last ten minutes so the buyer can retry it.
-                    fallback = await self.gmail.latest_code(
-                        credentials,
-                        self.vault.decrypt(product.steam_login_encrypted),
-                        max(
-                            now()
-                            - timedelta(minutes=min(10, search_settings["max_age_minutes"])),
-                            aware(order.paid_at),
-                        ),
-                        search_settings,
-                    )
-                    if fallback:
-                        fallback_code, fallback_message_id = fallback
-                        request.outcome = "reused"
-                        request.message_id = fallback_message_id
-                        await session.commit()
-                        return fallback_code, True
-                request.outcome = "not_found"
-                await session.commit()
-                raise ShopError("no_code")
-            except ShopError:
-                raise
             except Exception:
                 request.outcome = "error"
                 await session.commit()
-                log.warning("gmail_request_failed product=%s", product.id)
+                log.warning("steam_guard_generation_failed authenticator=%s", authenticator.id)
                 raise ShopError("error") from None
+            request.outcome = "found"
+            await session.commit()
+            return code
 
     async def reconcile(self):
         async with self.sessions() as session:

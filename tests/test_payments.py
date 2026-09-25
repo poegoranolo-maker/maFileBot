@@ -539,9 +539,7 @@ async def test_maintenance_and_hidden_product(shop):
     shop.mono.create.assert_not_awaited()
 
 
-async def test_checkout_allows_product_without_gmail(shop):
-    async with shop.sessions() as session, session.begin():
-        (await session.get(Product, 1)).gmail_credentials_encrypted = None
+async def test_checkout_does_not_require_a_mail_code_provider(shop):
     shop.mono.create.return_value = {"invoiceId": "without-mail", "pageUrl": "https://pay.test/no-mail"}
     order = await shop.checkout(1, 1)
     assert order.mono_invoice_id == "without-mail"

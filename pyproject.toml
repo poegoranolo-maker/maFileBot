@@ -1,7 +1,7 @@
 [project]
 name = "steamsell"
 version = "0.1.0"
-description = "Telegram shop with Monobank acquiring and Gmail OAuth"
+description = "Telegram shop with Monobank acquiring"
 requires-python = ">=3.12"
 dependencies = [
   "aiogram>=3.15,<4",

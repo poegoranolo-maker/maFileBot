@@ -37,6 +37,16 @@ class GmailMailbox(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
 
+class SteamAuthenticator(Base):
+    __tablename__ = "steam_authenticators"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_name: Mapped[str] = mapped_column(String(256), index=True)
+    steam_id: Mapped[str | None] = mapped_column(String(32), unique=True)
+    shared_secret_encrypted: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
 class Product(Base):
     __tablename__ = "products"
     __table_args__ = (
@@ -58,6 +68,9 @@ class Product(Base):
     reward_promo_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     steam_login_encrypted: Mapped[str | None] = mapped_column(Text)
     steam_password_encrypted: Mapped[str | None] = mapped_column(Text)
+    steam_authenticator_id: Mapped[int | None] = mapped_column(
+        ForeignKey("steam_authenticators.id"), index=True
+    )
     gmail_credentials_encrypted: Mapped[str | None] = mapped_column(Text)
     gmail_mailbox_id: Mapped[int | None] = mapped_column(ForeignKey("gmail_mailboxes.id"), index=True)
     visible: Mapped[bool] = mapped_column(Boolean, default=True)

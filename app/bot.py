@@ -14,7 +14,6 @@ from sqlalchemy import delete, func, or_, select
 
 from app.access import all_admin_ids, is_admin
 from app.i18n import money, tr
-from app.mailboxes import effective_code_limit
 from app.models import (
     CartItem,
     MailCodeRequest,
@@ -72,7 +71,7 @@ log = logging.getLogger(__name__)
 ACTIVATION_GUIDE = """🎟 Інструкція з активації гри в STEAM:
 
 1. Зайдіть у Steam з логіном і паролем, які отримали.
-2. Отримайте код Steam Guard (на запит у чаті).
+2. Якщо Steam попросить додаткове підтвердження, зверніться до підтримки.
    У верхньому лівому куті Steam відкрийте Steam → Налаштування → Remote Play та вимкніть повзунок.
 3. Завантажте та встановіть гру з бібліотеки Steam.
 4. Натисніть правою кнопкою на гру в бібліотеці, відкрийте «Властивості» та вимкніть хмарні збереження Steam Cloud.
@@ -1519,12 +1518,6 @@ def create_dispatcher(shop, storage):
                     [[(tr("support", lang), "https://t.me/" + support.lstrip("@"))], back(lang)],
                 )
                 return
-            code_limit = await effective_code_limit(session, product)
-            gmail_connected = bool(
-                code_limit > 0
-                and (product.gmail_mailbox_id or product.gmail_credentials_encrypted)
-                and code_request_window_open(order)
-            )
             await render(
                 event,
                 purchase_text(order, product, lang, shop.vault),
@@ -1532,8 +1525,8 @@ def create_dispatcher(shop, storage):
                     order,
                     lang,
                     support,
-                    gmail_connected,
-                    code_limit,
+                    bool(product.steam_authenticator_id and code_request_window_open(order)),
+                    product.code_limit,
                     return_target=f"purchase:{order.id}",
                 ),
             )
@@ -2037,18 +2030,12 @@ def create_dispatcher(shop, storage):
                 ],
             )
             return
-        code_limit = await effective_code_limit(session, product)
-        gmail_connected = bool(
-            code_limit > 0
-            and (product.gmail_mailbox_id or product.gmail_credentials_encrypted)
-            and code_request_window_open(order)
-        )
         found_codes = await session.scalar(
             select(func.count())
             .select_from(MailCodeRequest)
             .where(MailCodeRequest.order_id == order.id, MailCodeRequest.outcome == "found")
         )
-        remaining_codes = max(0, code_limit - found_codes)
+        remaining_codes = max(0, product.code_limit - found_codes)
         await render(
             callback,
             purchase_text(order, product, lang, shop.vault),
@@ -2056,7 +2043,7 @@ def create_dispatcher(shop, storage):
                 order,
                 lang,
                 support,
-                gmail_connected,
+                bool(product.steam_authenticator_id and code_request_window_open(order)),
                 remaining_codes,
                 code_request_available=remaining_codes > 0,
                 return_target=return_target,
@@ -2068,30 +2055,26 @@ def create_dispatcher(shop, storage):
         _, order_id, *source = callback.data.split(":")
         purchase_target = f"purchase:{order_id}:{source[0]}" if source else f"purchase:{order_id}"
         try:
-            code, reused = await shop.code(user.id, order_id)
+            steam_code = await shop.code(user.id, order_id)
         except ShopError as error:
-            if str(error) not in {"no_code", "cooldown", "code_limit", "error"}:
+            if str(error) not in {"cooldown", "code_limit", "error"}:
                 raise
             await render(callback, tr(str(error), lang), [back(lang, purchase_target)])
             return
         await callback.message.bot.send_message(
             chat_id=callback.message.chat.id,
-            text=(
-                f"{tr('code_result', lang)}:\n<code>{code}</code>"
-                + (f"\n\n{tr('code_reused', lang)}" if reused else "")
-                + f"\n\nℹ️ {tr('code_login_retry', lang)}"
-            ),
+            text=f"{tr('code_result', lang)}:\n<code>{steam_code}</code>\n\nℹ️ {tr('code_login_retry', lang)}",
             reply_markup=keyboard(
-                [[("📋 Копіювати код" if lang == "ua" else "📋 Копировать код", "copy:" + code)]]
+                [[("📋 Копіювати код" if lang == "ua" else "📋 Копировать код", "copy:" + steam_code)]]
             ),
             parse_mode="HTML",
             protect_content=True,
         )
         await render(
             callback,
-            "✅ Код надіслано окремим повідомленням і він залишиться в чаті."
+            "✅ Код надіслано окремим повідомленням."
             if lang == "ua"
-            else "✅ Код отправлен отдельным сообщением и останется в чате.",
+            else "✅ Код отправлен отдельным сообщением.",
             [back(lang, purchase_target)],
         )
 

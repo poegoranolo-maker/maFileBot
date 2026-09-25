@@ -27,41 +27,14 @@ def test_admin_panel_stays_in_persistent_menu_for_admins():
     assert "⚙️ Адмін-панель" in labels
 
 
-def test_code_button_is_hidden_without_gmail():
+def test_purchase_actions_include_steam_guard_when_available():
     order = SimpleNamespace(id="order-id")
-    rows = purchase_rows(order, "ua", "support", gmail_connected=False)
-    assert all(target != "code:order-id" for row in rows for _, target in row)
-    rows = purchase_rows(order, "ua", "support", gmail_connected=True)
+    rows = purchase_rows(order, "ua", "support", True, 3)
     assert any(target == "code:order-id" for row in rows for _, target in row)
-    rows = purchase_rows(order, "ua", "support", gmail_connected=True, code_requests_remaining=0)
-    assert any("ще 0" in label and target == "noop" for row in rows for label, target in row)
 
 
 def test_alternative_activation_guide_comes_from_order_snapshot():
     order = SimpleNamespace(id="order-id", activation_type_snapshot="alternative")
-    rows = purchase_rows(order, "ua", "support", gmail_connected=False)
+    rows = purchase_rows(order, "ua", "support")
 
     assert rows[0][0][1] == "alternative_activation_guide:order-id"
-
-
-def test_zero_reissues_still_shows_one_primary_code_request():
-    order = SimpleNamespace(id="order-id")
-    rows = purchase_rows(
-        order,
-        "ua",
-        "support",
-        gmail_connected=True,
-        code_requests_remaining=1,
-        code_request_available=True,
-    )
-    assert any("ще 1" in label and target == "code:order-id" for row in rows for label, target in row)
-
-    rows = purchase_rows(
-        order,
-        "ua",
-        "support",
-        gmail_connected=True,
-        code_requests_remaining=0,
-        code_request_available=False,
-    )
-    assert any("ще 0" in label and target == "noop" for row in rows for label, target in row)

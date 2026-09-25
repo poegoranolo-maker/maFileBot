@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 from aiogram import Bot
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -7,7 +7,7 @@ from aiogram.types import Update
 from sqlalchemy import select
 
 from app.bot import create_dispatcher
-from app.models import Broadcast, GmailMailbox, MailCodeRequest, Order, PaymentReceipt, Product, Setting, User
+from app.models import Broadcast, MailCodeRequest, Order, PaymentReceipt, Product, Setting, User
 
 
 def update(user_id=1, text=None, callback=None, group=False, photo=None):
@@ -168,46 +168,6 @@ async def test_admin_recent_orders_are_available_from_general_settings(shop):
     ]
 
 
-async def test_admin_can_manage_mail_search_settings_per_mailbox(shop):
-    dp = create_dispatcher(shop, MemoryStorage())
-    bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
-    bot.session = AsyncMock()
-
-    await dp.feed_update(bot, update(user_id=99, callback="a:settings"))
-    assert any(
-        button.callback_data == "a:mail_search"
-        for row in bot.session.call_args.args[1].reply_markup.inline_keyboard
-        for button in row
-    )
-    await dp.feed_update(bot, update(user_id=99, callback="a:mail_search"))
-    async with shop.sessions() as session:
-        mailbox = await session.scalar(select(GmailMailbox))
-        mailbox_id = mailbox.id
-    await dp.feed_update(bot, update(user_id=99, callback=f"a:mail_search:{mailbox_id}"))
-    method = bot.session.call_args.args[1]
-    callbacks = {
-        button.callback_data for row in method.reply_markup.inline_keyboard for button in row
-    }
-    assert f"a:mail_spaces:{mailbox_id}" in callbacks
-    assert f"a:mail_login:{mailbox_id}" in callbacks
-    assert f"a:mail_type:{mailbox_id}" in callbacks
-    assert f"a:mail_reset:{mailbox_id}" in callbacks
-    assert "Скрит" not in method.text
-
-    await dp.feed_update(bot, update(user_id=99, callback=f"a:mail_spaces:{mailbox_id}"))
-    await dp.feed_update(bot, update(user_id=99, callback=f"a:mail_login:{mailbox_id}"))
-    await dp.feed_update(
-        bot,
-        update(user_id=99, callback=f"a:mail_filter:{mailbox_id}:max_age_minutes"),
-    )
-    await dp.feed_update(bot, update(user_id=99, text="10"))
-    async with shop.sessions() as session:
-        mailbox = await session.get(GmailMailbox, mailbox_id)
-        assert mailbox.search_settings["allow_spaces"] is True
-        assert mailbox.search_settings["require_login"] is False
-        assert mailbox.search_settings["max_age_minutes"] == 10
-
-
 async def test_primary_admin_can_manage_database_admins(shop):
     dp = create_dispatcher(shop, MemoryStorage())
     bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
@@ -303,8 +263,6 @@ async def test_admin_product_wizard_edit_and_confirmed_delete(shop):
     dp = create_dispatcher(shop, storage)
     bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
     bot.session = AsyncMock()
-    shop.gmail.authorize_url = Mock(return_value="https://accounts.google.com/test")
-    shop.redis.get.return_value = shop.vault.pack({"email": "new@gmail.com", "refresh_token": "new-refresh"})
 
     async def send(text=None, callback=None):
         await dp.feed_update(bot, update(user_id=99, text=text, callback=callback))
@@ -316,8 +274,8 @@ async def test_admin_product_wizard_edit_and_confirmed_delete(shop):
         await send(callback="a:skip")
     await send(text="new_login")
     await send(text="new_password")
-    await send(callback="a:oauth")
-    await send(callback="a:gmail_done")
+    await send(callback="a:steam_auth:1")
+    await send(text="3")
     await send(callback="a:feature:1")
     await send(callback="a:feature:1")
     async with shop.sessions() as session:
@@ -347,7 +305,7 @@ async def test_admin_product_wizard_edit_and_confirmed_delete(shop):
         assert p.deleted_at and not p.visible
 
 
-async def test_admin_can_create_product_without_gmail(shop):
+async def test_admin_can_create_product_without_mail_code_provider(shop):
     storage = MemoryStorage()
     dp = create_dispatcher(shop, storage)
     bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
@@ -363,7 +321,8 @@ async def test_admin_can_create_product_without_gmail(shop):
     await send(text="Один опис для обох мов")
     await send(text="login")
     await send(text="password")
-    await send(callback="a:skip")  # Gmail
+    await send(callback="a:steam_auth:2")
+    await send(text="3")
     await send(callback="a:feature:0")
     await send(callback="a:feature:0")
     await send(callback="a:save")
@@ -373,7 +332,6 @@ async def test_admin_can_create_product_without_gmail(shop):
         assert product is not None
         assert product.name_ru == product.name_ua
         assert product.description_ru == product.description_ua
-        assert product.gmail_credentials_encrypted is None
 
 
 async def test_broadcast_requires_two_confirmations(shop):

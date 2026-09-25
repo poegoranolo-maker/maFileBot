@@ -42,8 +42,6 @@ class Config(DatabaseConfig):
     deepseek_api_key: SecretStr = SecretStr("")
     deepseek_vision_model: str = "deepseek-v4-flash-vision-exp"
     deepseek_timeout: int = Field(default=60, ge=10, le=180)
-    google_client_id: str
-    google_client_secret: SecretStr
     support_username: str
     page_size: int = Field(default=7, ge=1, le=20)
     code_cooldown: int = Field(default=30, ge=30)
@@ -63,7 +61,6 @@ class Config(DatabaseConfig):
             value = "https://" + self.railway_public_domain.strip()
         if not value and self.manual_card.strip():
             # A personal-card bot can work from long polling without a public HTTP URL.
-            # Gmail OAuth remains unavailable until an HTTPS URL is configured.
             self.public_base_url = ""
             return self
         parsed = urlsplit(value)

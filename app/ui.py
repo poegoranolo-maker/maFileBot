@@ -186,8 +186,7 @@ def purchase_text(order, product, lang, vault):
         f"🎮 <b>{escape(order.product_name_snapshot)}</b>\n"
         f"💰 {base_price}{promo_text}{tip_text}\n"
         f"🗓 {paid_at:%d.%m.%Y · %H:%M}\n\n"
-        f"{credentials}\n\n"
-        f"ℹ️ {tr('code_retry_hint', lang)}"
+        f"{credentials}"
     )
 
 
@@ -268,7 +267,7 @@ def persistent_menu(lang, admin=False, subscribed=False, loyalty_enabled=False):
 def admin_menu():
     rows = [
         [KeyboardButton(text="➕ Додати товар"), KeyboardButton(text="📦 Товари")],
-        [KeyboardButton(text="🔑 Отримати код"), KeyboardButton(text="🔥 Головна сторінка")],
+        [KeyboardButton(text="🔥 Головна сторінка")],
         [KeyboardButton(text="📢 Розсилка"), KeyboardButton(text="💬 Відгуки")],
         [KeyboardButton(text="⚙️ Загальні налаштування")],
         [KeyboardButton(text="⬅️ Вийти з адмінки")],
@@ -333,8 +332,8 @@ def purchase_rows(
     order,
     lang,
     support,
-    gmail_connected=True,
-    code_requests_remaining=2,
+    authenticator_connected=True,
+    code_requests_remaining=0,
     code_request_available=None,
     return_target="home",
 ):
@@ -344,14 +343,14 @@ def purchase_rows(
         if getattr(order, "activation_type_snapshot", "standard") == "alternative"
         else "activation_guide"
     )
-    code_target = (
-        f"code:{order.id}:{return_target.rsplit(':', 1)[1]}"
-        if return_target.startswith("purchases:")
-        else f"code:{order.id}"
-    )
-    if gmail_connected:
+    if authenticator_connected and code_requests_remaining > 0:
+        code_target = (
+            f"code:{order.id}:{return_target.rsplit(':', 1)[1]}"
+            if return_target.startswith("purchases:")
+            else f"code:{order.id}"
+        )
         if code_request_available is None:
-            code_request_available = code_requests_remaining > 0
+            code_request_available = True
         label = f"{tr('code', lang)} · {'ще' if lang == 'ua' else 'ещё'} {code_requests_remaining}"
         rows.append([(label, code_target if code_request_available else "noop")])
     rows.extend(

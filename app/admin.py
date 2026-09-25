@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import re
-import secrets
 import tempfile
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -14,21 +13,13 @@ from aiogram import F, Router
 from aiogram.filters import Command, Filter
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import FSInputFile
-from cryptography.fernet import InvalidToken
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, or_, select
 
 from app.access import admin_ids, is_admin, is_primary_admin
 from app.i18n import money, tr
-from app.mailboxes import (
-    credentials_for_product,
-    import_legacy_mailboxes,
-    mailbox_search_settings,
-    save_mailbox,
-)
 from app.models import (
     Broadcast,
-    GmailMailbox,
     LoyaltyLevel,
     MailCodeRequest,
     Order,
@@ -37,6 +28,7 @@ from app.models import (
     Product,
     PromoCode,
     Review,
+    SteamAuthenticator,
     User,
     now,
 )
@@ -53,6 +45,7 @@ from app.services import (
     set_setting,
     setting,
 )
+from app.steam_guard import generate_steam_guard_code, parse_mafile
 from app.ui import (
     admin_menu,
     discounted_price_text,
@@ -92,7 +85,6 @@ class Form(StatesGroup):
     order_request_photo = State()
     receipt_example_photo = State()
     referral_promo = State()
-    mail_search = State()
 
 
 FIELDS = [
@@ -100,20 +92,19 @@ FIELDS = [
     "description_ua",
     "image_file_id",
     "price",
-    "code_limit",
     "stock_quantity",
     "delivery_mode",
     "activation_type",
     "steam_login_encrypted",
     "steam_password_encrypted",
-    "gmail_mailbox_id",
+    "steam_authenticator_id",
+    "code_limit",
     "featured",
     "on_home",
 ]
 LABELS = {
     "name_ua": "Назва товару",
     "price": "Ціна у грн",
-    "code_limit": "Кількість кодів",
     "stock_quantity": "Кількість",
     "image_file_id": "Фото",
     "description_ua": "Опис",
@@ -121,11 +112,12 @@ LABELS = {
     "activation_type": "Тип активації",
     "steam_login_encrypted": "Steam Login",
     "steam_password_encrypted": "Steam Password",
-    "gmail_mailbox_id": "Gmail OAuth",
+    "steam_authenticator_id": "Steam Guard (.maFile)",
+    "code_limit": "Кількість кодів",
     "featured": "Додати до новинок?",
     "on_home": "Показувати на головній?",
 }
-OPTIONAL = {"image_file_id", "description_ua", "gmail_mailbox_id"}
+OPTIONAL = {"image_file_id", "description_ua"}
 DESCRIPTION_TEMPLATE = "Офлайн активація {name} у Steam !!!"
 BACK = [("⬅️ Адмінка", "a:home")]
 GENERAL_BACK = [("⬅️ Загальні налаштування", "a:general_settings")]
@@ -148,64 +140,6 @@ SETTINGS = {
     "order_request_description_ru": "Опис картки замовлення RU",
     "mono_token": "Токен Monobank",
 }
-
-MAIL_SEARCH_INPUTS = {
-    "code_limit": "Ліміт кодів на замовлення",
-    "max_age_minutes": "Максимальний вік листа",
-    "code_length": "Довжина коду",
-    "body_keyword": "Ключове слово в тілі листа",
-    "sender": "Відправник",
-    "subject": "Тема листа",
-}
-
-
-def mail_search_summary(mailbox):
-    settings = mailbox_search_settings(mailbox)
-    code_type = {"alnum": "Aa/12", "letters": "Aa", "digits": "12"}[settings["code_type"]]
-    code_limit = settings["code_limit"]
-    return (
-        f"📧 <b>{escape(mailbox.email)}</b>\n\n"
-        "<b>Активні налаштування пошуку:</b>\n"
-        f"🎫 Ліміт кодів: <b>{code_limit if code_limit is not None else 'із налаштувань товару'}</b>\n"
-        f"🕐 Макс. вік: <b>{settings['max_age_minutes']} хв.</b>\n"
-        f"📏 Довжина: <b>{settings['code_length']}</b>\n"
-        f"🧬 Пробіли: <b>{'дозволені' if settings['allow_spaces'] else 'не дозволені'}</b>\n"
-        f"👤 Перевірка Steam-логіна: <b>{'увімкнена' if settings['require_login'] else 'вимкнена'}</b>\n"
-        f"🔣 Тип коду: <b>{code_type}</b>\n"
-        f"📝 Ключове слово (Body): <b>{escape(settings['body_keyword']) or 'будь-яке'}</b>\n"
-        f"🔎 Відправник: <b>{escape(settings['sender']) or 'будь-який'}</b>\n"
-        f"🔍 Тема: <b>{escape(settings['subject']) or 'будь-яка'}</b>"
-    )
-
-
-def mail_search_rows(mailbox):
-    settings = mailbox_search_settings(mailbox)
-    code_type = {"alnum": "Aa/12", "letters": "Aa", "digits": "12"}[settings["code_type"]]
-    limit = settings["code_limit"]
-    return [
-        [(f"🎫 Ліміт кодів ({limit if limit is not None else 'товар'})", f"a:mail_filter:{mailbox.id}:code_limit")],
-        [(f"🕐 Макс. вік ({settings['max_age_minutes']} хв.)", f"a:mail_filter:{mailbox.id}:max_age_minutes")],
-        [
-            (f"📏 Довжина ({settings['code_length']})", f"a:mail_filter:{mailbox.id}:code_length"),
-            ("🧬 Пробіли", f"a:mail_spaces:{mailbox.id}"),
-        ],
-        [
-            (
-                "👤 Steam-логін: ВКЛ" if settings["require_login"] else "👤 Steam-логін: ВИКЛ",
-                f"a:mail_login:{mailbox.id}",
-            )
-        ],
-        [(f"🔣 Тип коду ({code_type})", f"a:mail_type:{mailbox.id}")],
-        [("📝 Ключове слово (Body)", f"a:mail_filter:{mailbox.id}:body_keyword")],
-        [
-            ("🔎 Відправник", f"a:mail_filter:{mailbox.id}:sender"),
-            ("🔍 Тема", f"a:mail_filter:{mailbox.id}:subject"),
-        ],
-        [("🧹 Скинути фільтри", f"a:mail_reset:{mailbox.id}")],
-        [("⬅️ До вибору пошти", "a:mail_search")],
-        GENERAL_BACK,
-    ]
-
 
 def valid_ukrainian_iban(value: str) -> bool:
     if not re.fullmatch(r"UA\d{27}", value):
@@ -268,24 +202,24 @@ async def prompt(event, state, session=None, shop=None):
         rows.append([("✅ Так", "a:feature:1"), ("❌ Ні", "a:feature:0")])
     if field == "stock_quantity":
         rows.append([("♾ Необмежено", "a:stock:unlimited"), ("📦 Вказати кількість", "a:stock:limited")])
-    if field == "code_limit":
-        rows.append([("🛡 Без захисту поштою", "a:code_limit:none")])
     if field == "delivery_mode":
         rows.append([("🤖 Автовидача ботом", "a:delivery:auto")])
         rows.append([("👤 Ручна видача адміністратором", "a:delivery:manual")])
     if field == "activation_type":
         rows.append([("Звичайна", "a:activation_type:standard")])
         rows.append([("Альтернативна", "a:activation_type:alternative")])
-    if field == "gmail_mailbox_id":
-        if session is not None and shop is not None:
-            await import_legacy_mailboxes(session, shop.vault)
-            await session.commit()
-            mailboxes = (await session.scalars(select(GmailMailbox).order_by(GmailMailbox.email))).all()
-            rows += [[(f"📧 {mailbox.email}", f"a:gmail_use:{mailbox.id}")] for mailbox in mailboxes]
-        rows += [
-            [("➕ Підключити нову Gmail", "a:oauth")],
-            [("✅ Перевірити нове підключення", "a:gmail_done")],
-        ]
+    if field == "steam_authenticator_id":
+        if session is not None:
+            authenticators = (
+                await session.scalars(select(SteamAuthenticator).order_by(SteamAuthenticator.account_name))
+            ).all()
+            rows += [
+                [(f"🔐 {item.account_name}", f"a:steam_auth:{item.id}")]
+                for item in authenticators
+            ]
+        prompt_text += "\n\nНадішліть .maFile документом або оберіть раніше доданий акаунт."
+    if field == "code_limit":
+        rows.append([("🚫 Не видавати коди", "a:code_limit:none")])
     rows.append([("❌ Скасувати", "a:home")])
     await render(event, prompt_text, rows)
 
@@ -294,18 +228,17 @@ async def preview(event, state, shop):
     data = await state.get_data()
     p = Product(**data["draft"])
     delivery_text = (
-        "👤 Видача: вручну адміністратором. Дані акаунта та Gmail не потрібні."
+        "👤 Видача: вручну адміністратором. Дані акаунта не потрібні."
         if p.delivery_mode == "manual"
-        else "🤖 Видача: автоматично ботом.\n\nДані акаунта: збережено без показу.\nGmail: "
-        + ("підключено." if p.gmail_mailbox_id else "не підключено.")
+        else "🤖 Видача: автоматично ботом.\n\nДані акаунта й maFile: збережено без показу."
     )
     await render(
         event,
         product_text(p, "ua")
-        + f"\n\n🔑 Доступно кодів на покупку: <b>{p.code_limit}</b>"
-        + "\n🎟 Тип активації: <b>"
+        + "\n\n🎟 Тип активації: <b>"
         + ("альтернативна" if p.activation_type == "alternative" else "звичайна")
         + "</b>"
+        + f"\n🔑 Кодів на покупку: <b>{p.code_limit}</b>"
         + f"\n\n{delivery_text}",
         [[("✅ Зберегти", "a:save"), ("✏️ Редагувати", "a:review")], [("❌ Скасувати", "a:home")]],
         photo=p.image_file_id,
@@ -317,8 +250,14 @@ async def accept(event, state, shop, value, session=None):
     draft = data.get("draft", {})
     draft[data["field"]] = value
     if data["field"] == "delivery_mode" and value == "manual":
-        for secret_field in ("steam_login_encrypted", "steam_password_encrypted", "gmail_mailbox_id"):
+        for secret_field in (
+            "steam_login_encrypted",
+            "steam_password_encrypted",
+            "steam_authenticator_id",
+            "code_limit",
+        ):
             draft[secret_field] = None
+        draft["code_limit"] = 0
     # The storefront keeps both DB columns for compatibility, while the admin
     # enters one shared title and description for both interface languages.
     if data["field"] == "name_ua":
@@ -344,7 +283,8 @@ async def accept(event, state, shop, value, session=None):
     while (
         draft.get("delivery_mode") == "manual"
         and index < len(FIELDS)
-        and FIELDS[index] in {"steam_login_encrypted", "steam_password_encrypted", "gmail_mailbox_id"}
+        and FIELDS[index]
+        in {"steam_login_encrypted", "steam_password_encrypted", "steam_authenticator_id", "code_limit"}
     ):
         index += 1
     if index == len(FIELDS):
@@ -969,131 +909,6 @@ def admin_router():
             ],
         )
 
-    @router.callback_query(F.data.regexp(r"^a:latest_code(?::\d+)?$"))
-    @router.message(F.text == "🔑 Отримати код")
-    async def latest_steam_code(callback, session, shop):
-        await import_legacy_mailboxes(session, shop.vault)
-        await session.commit()
-        products = (
-            await session.scalars(
-                select(Product)
-                .where(
-                    Product.deleted_at.is_(None),
-                    or_(
-                        Product.gmail_mailbox_id.is_not(None),
-                        Product.gmail_credentials_encrypted.is_not(None),
-                    ),
-                )
-                .order_by(Product.id)
-            )
-        ).all()
-        mailboxes = {}
-        for product in products:
-            try:
-                credentials = await credentials_for_product(session, product, shop.vault)
-                email = credentials["email"]
-                login = shop.vault.decrypt(product.steam_login_encrypted)
-            except (AttributeError, InvalidToken, KeyError, TypeError, ValueError):
-                continue
-            mailbox = mailboxes.setdefault(
-                email,
-                {
-                    "product_id": product.id,
-                    "credentials": credentials,
-                    "accounts": [],
-                    "settings": mailbox_search_settings(
-                        await session.get(GmailMailbox, product.gmail_mailbox_id)
-                    ),
-                },
-            )
-            # Prefer the newest OAuth connection when several products use the
-            # same address, but keep all Steam accounts assigned to that mailbox.
-            mailbox["product_id"] = product.id
-            mailbox["credentials"] = credentials
-            mailbox["accounts"].append((login, product.name_ua))
-        if not mailboxes:
-            await render(callback, "Немає товарів із підключеною Gmail-поштою.", [BACK])
-            return
-
-        selected_product_id = None
-        data = getattr(callback, "data", None)
-        if data and data.startswith("a:latest_code:"):
-            selected_product_id = int(data.rsplit(":", 1)[1])
-        selected_email, mailbox = next(
-            ((email, item) for email, item in mailboxes.items() if item["product_id"] == selected_product_id),
-            (None, None),
-        )
-        if mailbox is None:
-            await render(
-                callback,
-                "📧 <b>Оберіть пошту, з якої потрібно отримати код:</b>",
-                [
-                    [(f"📧 {email}", f"a:latest_code:{item['product_id']}")]
-                    for email, item in mailboxes.items()
-                ]
-                + [BACK],
-            )
-            return
-
-        retry_target = f"a:latest_code:{mailbox['product_id']}"
-        allowed = await shop.redis.eval(
-            "if redis.call('EXISTS',KEYS[1])==1 then return 0 end "
-            "redis.call('SET',KEYS[1],'1','EX',ARGV[1]); return 1",
-            1,
-            f"code:admin:mailbox:{selected_email}",
-            30,
-        )
-        if not allowed:
-            await render(
-                callback,
-                "⏳ Зачекайте 30 секунд перед наступним пошуком коду.",
-                [[("🔄 Оновити", retry_target)], BACK],
-            )
-            return
-        try:
-            result = await shop.gmail.latest_code_for_accounts(
-                mailbox["credentials"],
-                mailbox["accounts"],
-                now() - timedelta(minutes=mailbox["settings"]["max_age_minutes"]),
-                mailbox["settings"],
-            )
-        except Exception:
-            await render(
-                callback,
-                "Не вдалося прочитати Gmail. Перевірте підключення пошти та спробуйте ще раз.",
-                [BACK],
-            )
-            return
-        if not result:
-            await render(
-                callback,
-                "За останні "
-                f"{mailbox['settings']['max_age_minutes']} хв. відповідний код не знайдено.",
-                [[("🔄 Перевірити ще раз", retry_target)], BACK],
-            )
-            return
-        code, login, game, received_at = result
-        code_text = (
-            "🔑 <b>Останній код Steam Guard</b>\n\n"
-            f"📧 {escape(selected_email)}\n"
-            f"🎮 {escape(game)}\n"
-            f"👤 {escape(login)}\n"
-            f"🔐 <code>{escape(code)}</code>\n"
-            f"🕒 {received_at.astimezone(ZoneInfo('Europe/Kyiv')):%d.%m.%Y · %H:%M}"
-        )
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=code_text,
-            reply_markup=keyboard([[("📋 Копіювати код", "copy:" + code)]]),
-            parse_mode="HTML",
-            protect_content=True,
-        )
-        await render(
-            callback,
-            "✅ Код надіслано окремим повідомленням і він залишиться в чаті.",
-            [[("🔄 Оновити", retry_target)], BACK],
-        )
-
     @router.callback_query(F.data.regexp(r"^a:paymode:(mono|deepseek|hybrid)$"))
     async def payment_mode_set(callback, session):
         mode = callback.data.rsplit(":", 1)[1]
@@ -1610,8 +1425,63 @@ def admin_router():
     async def input_product(message, state, shop, session):
         data = await state.get_data()
         field = data["field"]
-        if field in ("featured", "on_home", "gmail_mailbox_id"):
+        if field in ("featured", "on_home"):
             await prompt(message, state, session, shop)
+            return
+        if field == "steam_authenticator_id":
+            if not message.document:
+                await message.answer("Надішліть .maFile як документ або оберіть збережений акаунт.")
+                return
+            if message.document.file_size and message.document.file_size > 256_000:
+                await message.answer("Файл завеликий.")
+                return
+            try:
+                downloaded = await message.bot.download(message.document)
+                parsed = parse_mafile(downloaded.read())
+                encrypted_login = data.get("draft", {}).get("steam_login_encrypted")
+                if not encrypted_login and data.get("edit_id"):
+                    product = await session.get(Product, data["edit_id"])
+                    encrypted_login = product.steam_login_encrypted if product else None
+                login = shop.vault.decrypt(encrypted_login) if encrypted_login else ""
+                if parsed["account_name"].casefold() != login.casefold():
+                    raise ValueError(
+                        f"maFile належить акаунту {parsed['account_name']}, а в товарі вказано {login}."
+                    )
+                authenticator = None
+                if parsed["steam_id"]:
+                    authenticator = await session.scalar(
+                        select(SteamAuthenticator).where(
+                            SteamAuthenticator.steam_id == parsed["steam_id"]
+                        )
+                    )
+                if authenticator:
+                    authenticator.account_name = parsed["account_name"]
+                    authenticator.shared_secret_encrypted = shop.vault.encrypt(parsed["shared_secret"])
+                else:
+                    authenticator = SteamAuthenticator(
+                        account_name=parsed["account_name"],
+                        steam_id=parsed["steam_id"] or None,
+                        shared_secret_encrypted=shop.vault.encrypt(parsed["shared_secret"]),
+                    )
+                    session.add(authenticator)
+                await session.flush()
+                generate_steam_guard_code(parsed["shared_secret"])
+                authenticator_id = authenticator.id
+                await session.commit()
+            except ValueError as error:
+                await session.rollback()
+                await message.answer(str(error))
+                return
+            except Exception:
+                await session.rollback()
+                log.exception("mafile_import_failed")
+                await message.answer("Не вдалося прочитати .maFile.")
+                return
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            await accept(message, state, shop, authenticator_id, session)
             return
         try:
             value = parse_field(field, message, shop)
@@ -1629,7 +1499,7 @@ def admin_router():
     async def skip(callback, state, shop, session):
         data = await state.get_data()
         if data.get("field") in OPTIONAL:
-            value = None if data["field"] in {"image_file_id", "gmail_mailbox_id"} else ""
+            value = None if data["field"] == "image_file_id" else ""
             await accept(callback, state, shop, value, session)
 
     @router.callback_query(F.data == "a:use_description")
@@ -1663,6 +1533,26 @@ def admin_router():
         if (await state.get_data()).get("field") == "code_limit":
             await accept(callback, state, shop, 0, session)
 
+    @router.callback_query(F.data.regexp(r"^a:steam_auth:\d+$"))
+    async def select_steam_authenticator(callback, state, shop, session):
+        data = await state.get_data()
+        if data.get("field") != "steam_authenticator_id":
+            return
+        authenticator = await session.get(
+            SteamAuthenticator, int(callback.data.rsplit(":", 1)[1])
+        )
+        if not authenticator:
+            return
+        encrypted_login = data.get("draft", {}).get("steam_login_encrypted")
+        if not encrypted_login and data.get("edit_id"):
+            product = await session.get(Product, data["edit_id"])
+            encrypted_login = product.steam_login_encrypted if product else None
+        login = shop.vault.decrypt(encrypted_login) if encrypted_login else ""
+        if authenticator.account_name.casefold() != login.casefold():
+            await callback.answer("Логін товару не збігається з maFile.", show_alert=True)
+            return
+        await accept(callback, state, shop, authenticator.id, session)
+
     @router.callback_query(F.data.regexp(r"^a:delivery:(auto|manual)$"))
     async def delivery_mode(callback, state, shop, session):
         if (await state.get_data()).get("field") == "delivery_mode":
@@ -1672,49 +1562,6 @@ def admin_router():
     async def activation_type(callback, state, shop, session):
         if (await state.get_data()).get("field") == "activation_type":
             await accept(callback, state, shop, callback.data.rsplit(":", 1)[1], session)
-
-    @router.callback_query(F.data == "a:oauth")
-    async def oauth(callback, state, shop):
-        data = await state.get_data()
-        if data.get("field") != "gmail_mailbox_id":
-            return
-        nonce = secrets.token_urlsafe(32)
-        await state.update_data(oauth_nonce=nonce)
-        # Connection is staged, never written to a product without admin confirmation.
-        await shop.redis.set("oauth:" + nonce, str(callback.from_user.id), ex=600)
-        await render(
-            callback,
-            "Авторизуйте потрібну Gmail-скриньку. Потім поверніться та перевірте підключення.",
-            [
-                [("Відкрити Google", shop.gmail.authorize_url(nonce))],
-                [("✅ Перевірити підключення", "a:gmail_done")],
-                [BACK[0]],
-            ],
-        )
-
-    @router.callback_query(F.data == "a:gmail_done")
-    async def gmail_done(callback, state, shop, session):
-        data = await state.get_data()
-        if data.get("field") != "gmail_mailbox_id":
-            return
-        credentials = await shop.redis.get("gmail:draft:" + data.get("oauth_nonce", "none"))
-        if not credentials:
-            await callback.message.answer("Підключення ще не завершено або термін дії минув.")
-            return
-        mailbox = await save_mailbox(session, shop.vault, credentials)
-        await session.commit()
-        await callback.message.answer("Підключено: " + mailbox.email)
-        await accept(callback, state, shop, mailbox.id, session)
-
-    @router.callback_query(F.data.startswith("a:gmail_use:"))
-    async def gmail_use(callback, state, shop, session):
-        data = await state.get_data()
-        if data.get("field") != "gmail_mailbox_id":
-            return
-        mailbox_id = int(callback.data.rsplit(":", 1)[1])
-        if not await session.get(GmailMailbox, mailbox_id):
-            return
-        await accept(callback, state, shop, mailbox_id, session)
 
     @router.callback_query(F.data == "a:save")
     async def save(callback, state, session, shop):
@@ -1853,13 +1700,10 @@ def admin_router():
                 ).where(Order.product_id == p.id, Order.status.in_(SUCCESS))
             )
         ).one()
-        mailbox = await session.get(GmailMailbox, p.gmail_mailbox_id) if p.gmail_mailbox_id else None
-        gmail_label = f"Gmail: {mailbox.email}" if mailbox else LABELS["gmail_mailbox_id"]
         rows = [
             [(LABELS["name_ua"], f"a:edit:{p.id}:name_ua")],
             [
                 (LABELS["price"], f"a:edit:{p.id}:price"),
-                (LABELS["code_limit"], f"a:edit:{p.id}:code_limit"),
             ],
             [
                 (LABELS["image_file_id"], f"a:edit:{p.id}:image_file_id"),
@@ -1870,8 +1714,11 @@ def admin_router():
                 (LABELS["steam_password_encrypted"], f"a:edit:{p.id}:steam_password_encrypted"),
             ],
             [
+                (LABELS["steam_authenticator_id"], f"a:edit:{p.id}:steam_authenticator_id"),
+                (LABELS["code_limit"], f"a:edit:{p.id}:code_limit"),
+            ],
+            [
                 (LABELS["stock_quantity"], f"a:edit:{p.id}:stock_quantity"),
-                (gmail_label, f"a:edit:{p.id}:gmail_mailbox_id"),
             ],
             [(LABELS["delivery_mode"], f"a:edit:{p.id}:delivery_mode")],
             [(LABELS["activation_type"], f"a:edit:{p.id}:activation_type")],
@@ -1891,8 +1738,7 @@ def admin_router():
         await render(
             callback,
             product_text(p, "ua")
-            + f"\n\n🔑 Доступно кодів на покупку: <b>{p.code_limit}</b>"
-            + "\n🎟 Тип активації: <b>"
+            + "\n\n🎟 Тип активації: <b>"
             + ("альтернативна" if p.activation_type == "alternative" else "звичайна")
             + "</b>"
             + f"\n📊 Продано за весь час: <b>{sold}</b> на суму <b>{money(revenue)}</b>",
@@ -2509,7 +2355,6 @@ def admin_router():
             )
         ]
         compact_buttons = setting_buttons + [
-            ("📨 Пошук коду в пошті", "a:mail_search"),
             ("👋 Привітання", "a:welcome_settings"),
             ("ℹ️ Інформація", "a:info_settings"),
             ("🎟 Активація гри", "a:activation_guide_settings"),
@@ -2592,174 +2437,6 @@ def admin_router():
         audit(session, callback.from_user.id, "cart_reward_promos_toggle", not enabled)
         await session.commit()
         await promos(callback, state, session)
-
-    @router.callback_query(F.data == "a:mail_search")
-    async def mail_search_list(callback, state, session, shop):
-        await state.clear()
-        await import_legacy_mailboxes(session, shop.vault)
-        await session.commit()
-        mailboxes = (await session.scalars(select(GmailMailbox).order_by(GmailMailbox.email))).all()
-        rows = [[(f"📧 {mailbox.email}", f"a:mail_search:{mailbox.id}")] for mailbox in mailboxes]
-        rows += [[("⬅️ Налаштування", "a:settings")], GENERAL_BACK]
-        await render(
-            callback,
-            "📨 <b>Налаштування пошуку коду</b>\n\n"
-            + ("Оберіть Gmail-пошту:" if mailboxes else "Підключених Gmail-скриньок ще немає."),
-            rows,
-        )
-
-    @router.callback_query(F.data.regexp(r"^a:mail_search:\d+$"))
-    async def mail_search_detail(callback, state, session):
-        await state.clear()
-        mailbox = await session.get(GmailMailbox, int(callback.data.rsplit(":", 1)[1]))
-        if not mailbox:
-            await render(
-                callback,
-                "Поштову скриньку не знайдено.",
-                [[("⬅️ До вибору пошти", "a:mail_search")], GENERAL_BACK],
-            )
-            return
-        await render(callback, mail_search_summary(mailbox), mail_search_rows(mailbox))
-
-    @router.callback_query(F.data.regexp(r"^a:mail_filter:\d+:[a-z_]+$"))
-    async def mail_search_input_start(callback, state, session):
-        _, _, mailbox_id, key = callback.data.split(":", 3)
-        if key not in MAIL_SEARCH_INPUTS:
-            return
-        mailbox = await session.get(GmailMailbox, int(mailbox_id))
-        if not mailbox:
-            return
-        settings = mailbox_search_settings(mailbox)
-        await state.set_state(Form.mail_search)
-        await state.set_data({"mailbox_id": mailbox.id, "mail_search_key": key})
-        prompts = {
-            "code_limit": "Введіть число від 0 до 20.",
-            "max_age_minutes": "Введіть максимальний вік листа у хвилинах: від 1 до 1440.",
-            "code_length": "Введіть кількість символів у коді: від 1 до 64.",
-            "body_keyword": "Введіть ключове слово або фразу, після якої шукати код у тілі листа.",
-            "sender": "Введіть точну email-адресу відправника.",
-            "subject": "Введіть слово або фразу, яка має бути в темі листа.",
-        }
-        clear_label = "Використовувати ліміт товару" if key == "code_limit" else "Очистити фільтр"
-        clear_button = (
-            [[(f"🧹 {clear_label}", f"a:mail_clear:{mailbox.id}:{key}")]]
-            if key in {"code_limit", "body_keyword", "sender", "subject"}
-            else []
-        )
-        current = settings[key]
-        await render(
-            callback,
-            f"<b>{MAIL_SEARCH_INPUTS[key]}</b>\n\nПоточне значення: "
-            f"<code>{escape(str(current if current is not None else 'налаштування товару'))}</code>\n\n"
-            + prompts[key],
-            clear_button
-            + [[("❌ Скасувати", f"a:mail_search:{mailbox.id}")], GENERAL_BACK],
-        )
-
-    @router.message(Form.mail_search)
-    async def mail_search_input_save(message, state, session):
-        data = await state.get_data()
-        mailbox = await session.get(GmailMailbox, data.get("mailbox_id"))
-        key = data.get("mail_search_key")
-        if not mailbox or key not in MAIL_SEARCH_INPUTS:
-            await state.clear()
-            return
-        value = (message.text or "").strip()
-        if key == "code_limit":
-            if not value.isdigit() or not 0 <= int(value) <= 20:
-                await message.answer("Введіть ціле число від 0 до 20.")
-                return
-            parsed = int(value)
-        elif key == "max_age_minutes":
-            if not value.isdigit() or not 1 <= int(value) <= 1440:
-                await message.answer("Введіть ціле число від 1 до 1440.")
-                return
-            parsed = int(value)
-        elif key == "code_length":
-            if not value.isdigit() or not 1 <= int(value) <= 64:
-                await message.answer("Введіть ціле число від 1 до 64.")
-                return
-            parsed = int(value)
-        else:
-            if not value or len(value) > 200:
-                await message.answer("Введіть від 1 до 200 символів.")
-                return
-            if key == "sender" and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
-                await message.answer("Введіть коректну email-адресу відправника.")
-                return
-            parsed = value.lower() if key == "sender" else value
-        updated = dict(mailbox.search_settings or {})
-        updated[key] = parsed
-        mailbox.search_settings = updated
-        audit(session, message.from_user.id, "mail_search_change", f"{mailbox.id}:{key}")
-        await session.commit()
-        await state.clear()
-        await render(message, mail_search_summary(mailbox), mail_search_rows(mailbox))
-
-    @router.callback_query(F.data.regexp(r"^a:mail_clear:\d+:[a-z_]+$"))
-    async def mail_search_clear(callback, state, session):
-        _, _, mailbox_id, key = callback.data.split(":", 3)
-        if key not in {"code_limit", "body_keyword", "sender", "subject"}:
-            return
-        mailbox = await session.get(GmailMailbox, int(mailbox_id))
-        if not mailbox:
-            return
-        updated = dict(mailbox.search_settings or {})
-        updated[key] = None if key == "code_limit" else ""
-        mailbox.search_settings = updated
-        audit(session, callback.from_user.id, "mail_search_clear", f"{mailbox.id}:{key}")
-        await session.commit()
-        await state.clear()
-        await render(callback, mail_search_summary(mailbox), mail_search_rows(mailbox))
-
-    @router.callback_query(F.data.regexp(r"^a:mail_spaces:\d+$"))
-    async def mail_search_spaces(callback, session):
-        mailbox = await session.get(GmailMailbox, int(callback.data.rsplit(":", 1)[1]))
-        if not mailbox:
-            return
-        updated = dict(mailbox.search_settings or {})
-        updated["allow_spaces"] = not mailbox_search_settings(mailbox)["allow_spaces"]
-        mailbox.search_settings = updated
-        audit(session, callback.from_user.id, "mail_search_spaces", mailbox.id)
-        await session.commit()
-        await render(callback, mail_search_summary(mailbox), mail_search_rows(mailbox))
-
-    @router.callback_query(F.data.regexp(r"^a:mail_login:\d+$"))
-    async def mail_search_login(callback, session):
-        mailbox = await session.get(GmailMailbox, int(callback.data.rsplit(":", 1)[1]))
-        if not mailbox:
-            return
-        updated = dict(mailbox.search_settings or {})
-        updated["require_login"] = not mailbox_search_settings(mailbox)["require_login"]
-        mailbox.search_settings = updated
-        audit(session, callback.from_user.id, "mail_search_login", mailbox.id)
-        await session.commit()
-        await render(callback, mail_search_summary(mailbox), mail_search_rows(mailbox))
-
-    @router.callback_query(F.data.regexp(r"^a:mail_type:\d+$"))
-    async def mail_search_type(callback, session):
-        mailbox = await session.get(GmailMailbox, int(callback.data.rsplit(":", 1)[1]))
-        if not mailbox:
-            return
-        current = mailbox_search_settings(mailbox)["code_type"]
-        choices = ["alnum", "letters", "digits"]
-        updated = dict(mailbox.search_settings or {})
-        updated["code_type"] = choices[(choices.index(current) + 1) % len(choices)]
-        mailbox.search_settings = updated
-        audit(session, callback.from_user.id, "mail_search_type", mailbox.id)
-        await session.commit()
-        await render(callback, mail_search_summary(mailbox), mail_search_rows(mailbox))
-
-    @router.callback_query(F.data.regexp(r"^a:mail_reset:\d+$"))
-    async def mail_search_reset(callback, state, session):
-        mailbox = await session.get(GmailMailbox, int(callback.data.rsplit(":", 1)[1]))
-        if not mailbox:
-            return
-        mailbox.search_settings = {}
-        audit(session, callback.from_user.id, "mail_search_reset", mailbox.id)
-        await session.commit()
-        await state.clear()
-        await render(callback, mail_search_summary(mailbox), mail_search_rows(mailbox))
 
     @router.callback_query(F.data == "a:receipt_example_settings")
     async def receipt_example_settings(callback, state, session):

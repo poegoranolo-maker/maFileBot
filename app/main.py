@@ -9,16 +9,13 @@ from aiogram import Bot
 from aiogram.fsm.storage.redis import RedisEventIsolation, RedisStorage
 from aiogram.types import BotCommand
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
 
-from app.access import is_admin
 from app.bot import create_dispatcher
 from app.config import config
 from app.db import database
-from app.gmail import Gmail
-from app.models import User
 from app.monobank import Monobank
 from app.security import Vault
 from app.services import Shop, setting
@@ -44,7 +41,7 @@ async def lifespan(app):
         saved = await setting(session, "mono_token")
         if saved:
             mono.token = vault.decrypt(saved)
-    shop = Shop(cfg, sessions, vault, mono, Gmail(cfg, client), redis)
+    shop = Shop(cfg, sessions, vault, mono, redis)
     bot = Bot(cfg.bot_token.get_secret_value())
     await bot.set_my_commands(
         [
@@ -115,33 +112,3 @@ async def monobank_webhook(request: Request):
     except Exception:
         log.warning("payment_webhook_failed")
         return JSONResponse({"error": "temporary_failure"}, status_code=503)
-
-
-@app.get("/oauth/gmail/callback", response_class=HTMLResponse)
-async def gmail_callback(request: Request, state: str = "", code: str = "", error: str = ""):
-    shop = request.app.state.shop
-    headers = {
-        "Cache-Control": "no-store",
-        "Referrer-Policy": "no-referrer",
-        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
-    }
-    if len(state) > 100 or not state:
-        return HTMLResponse("Invalid state", status_code=400, headers=headers)
-    admin_id = await shop.redis.getdel("oauth:" + state)
-    admin = None
-    if admin_id:
-        async with shop.sessions() as session:
-            admin = await session.get(User, int(admin_id))
-    if not admin_id or not is_admin(shop.cfg, int(admin_id), admin):
-        return HTMLResponse(
-            "Authorization expired. Start again in Telegram.", status_code=400, headers=headers
-        )
-    if error or not code:
-        return HTMLResponse("Authorization cancelled. Return to Telegram.", status_code=400, headers=headers)
-    try:
-        credentials = await shop.gmail.exchange(code)
-        await shop.redis.set("gmail:draft:" + state, shop.vault.pack(credentials), ex=1800)
-    except Exception:
-        log.warning("gmail_oauth_failed")
-        return HTMLResponse("Connection failed. Start again in Telegram.", status_code=400, headers=headers)
-    return HTMLResponse("Gmail connected. Return to Telegram and confirm the connection.", headers=headers)

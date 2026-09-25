@@ -7,9 +7,9 @@ Telegram-магазин на Python: aiogram 3, FastAPI, PostgreSQL, SQLAlchemy/
 - Каталог і новинки з пагінацією, фото, описом та ручним порядком товарів на головній.
 - Monobank merchant acquiring: окремі рахунки, ECDSA-перевірка webhook, перевірка суми/UAH/reference, захист від повторної обробки, періодична звірка статусів.
 - Автоматична видача Steam-даних, історія покупок зі знімком назви й ціни. Товар продається повторно; приховування та soft delete не забирають попередні покупки.
-- Gmail OAuth для кожного товару, отримання свіжого Steam Guard-коду, перевірка покупця, ліміти запитів і журнал без кодів та токенів.
+- Імпорт `.maFile`, локальна генерація Steam Guard-коду, перевірка покупця, ліміти запитів і журнал без кодів та секретів.
 - Покрокове додавання товару, редагування окремих полів, підтвердження змін, користувачі, замовлення, статистика, налаштування та розсилки з двома підтвердженнями.
-- Шифрування Steam-даних, Gmail refresh tokens і змінюваного Monobank-токена через Fernet. Чернетки секретів у Redis також зашифровані.
+- Шифрування Steam-даних, `shared_secret` з `.maFile` і змінюваного Monobank-токена через Fernet.
 - Docker Compose, міграція бази, щоденний backup, перевірка `/health`, CI та автоматичні тести.
 
 ## Запуск
@@ -29,12 +29,9 @@ Telegram-магазин на Python: aiogram 3, FastAPI, PostgreSQL, SQLAlchemy/
    | `ADMIN_ID` | Ваш числовий Telegram ID |
    | `ENCRYPTION_KEY` | Згенерований ключ Fernet; команда нижче |
    | `MONO_TOKEN` | Merchant acquiring token Monobank |
-   | `GOOGLE_CLIENT_ID` | OAuth client ID типу Web application |
-   | `GOOGLE_CLIENT_SECRET` | Secret цього Google OAuth client |
    | `SUPPORT_USERNAME` | Ваш Telegram username без `@` |
 
 5. У сервісі бота: **Settings → Networking → Public Networking → Generate Domain**, target port **8000**. Railway надасть адресу на зразок `https://steamsell-production.up.railway.app`. Її бере змінна `RAILWAY_PUBLIC_DOMAIN`; `PUBLIC_BASE_URL` можна взагалі не задавати. Якщо раніше скопіювали `https://shop.example.com`, видаліть цю змінну — явно задана адреса має пріоритет.
-6. У Google Cloud → OAuth client → **Authorized redirect URIs** додайте `https://ВАША-АДРЕСА.up.railway.app/oauth/gmail/callback`. Використовуйте саме адресу з Railway. Власний придбаний домен не потрібен; налаштування consent screen/дозволів Google залишаються обов'язковими.
 7. Застосуйте Variables і виконайте **Deploy/Redeploy**. Міграції запускаються автоматично. Якщо перша спроба відбулась до заповнення ключів чи генерації адреси, повторіть deploy після налаштувань.
 8. Перевірте `https://ВАША-АДРЕСА.up.railway.app/health`, потім `/start` і `/admin` у Telegram. Залиште один replica та вимкніть Serverless/App Sleeping, якщо цей режим увімкнено: бот має постійно отримувати оновлення і перевіряти платежі.
 
@@ -52,7 +49,7 @@ uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_
 
 ### Власний сервер із Docker Compose
 
-Для цього варіанта потрібен сервер із Docker Compose. Домен і HTTPS reverse proxy потрібні тільки для Gmail OAuth або Monobank acquiring webhook.
+Для цього варіанта потрібен сервер із Docker Compose. Домен і HTTPS reverse proxy потрібні для Monobank acquiring webhook.
 
 #### Ubuntu 24.04: запуск для клієнта
 
@@ -74,13 +71,13 @@ docker compose up -d --build
 Клієнт має зберегти свій `ENCRYPTION_KEY` окремо: він потрібен для відновлення даних із backup.
 Не передавайте клієнту чужі `.env`, `backups/` або Docker volumes.
 Якщо використовується лише оплата на картку (`MANUAL_CARD`), домен для запуску бота не потрібен.
-Для Gmail OAuth потрібна постійна HTTPS-адреса в `PUBLIC_BASE_URL`.
+Для Monobank acquiring webhook потрібна постійна HTTPS-адреса в `PUBLIC_BASE_URL`.
 
 1. Скопіюйте `.env.example` у `.env`.
 2. Заповніть `BOT_TOKEN` від BotFather і свій числовий `ADMIN_ID`. Вкажіть `SUPPORT_USERNAME` без `@`.
 3. Створіть ключ: `uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Запишіть результат у `ENCRYPTION_KEY`. Збережіть окрему захищену копію ключа: без нього база не розшифровується. Не змінюйте ключ без міграції зашифрованих даних.
 4. Задайте сильний `POSTGRES_PASSWORD` і той самий пароль у `DATABASE_URL` (спецсимволи в URL потрібно percent-encode).
-5. Додайте `MONO_TOKEN` еквайрингу, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `PUBLIC_BASE_URL=https://ваш-домен`.
+5. Додайте `MONO_TOKEN` еквайрингу та `PUBLIC_BASE_URL=https://ваш-домен`.
 6. Виконайте `docker compose up -d --build`. Сервіс `migrate` застосує Alembic перед стартом бота.
 7. Налаштуйте HTTPS proxy на `127.0.0.1:8000`. Приклад для Caddy у `deploy/Caddyfile`. Не записуйте query string OAuth callback в access logs.
 8. Відкрийте `/start`, оберіть мову. З акаунта адміністратора відкрийте `/admin` і додайте товар.
@@ -146,27 +143,20 @@ JPEG, PNG, GIF або WebP до 8 MB, зберігає унікальний SHA-
 
 Документація моделі: [DeepSeek Vision](https://api-docs.deepseek.com/guides/vision/).
 
-## Підключення Gmail
+## Підключення Steam Guard через maFile
 
-1. У Google Cloud увімкніть Gmail API, налаштуйте OAuth consent screen та OAuth client типу **Web application**.
-2. Додайте точний redirect URI: `https://ваш-домен/oauth/gmail/callback`.
-3. Налаштуйте доступ до застосунку для потрібних Gmail-скриньок. Для довготривалої роботи врахуйте вимоги Google до публікації/верифікації застосунку зі scope `gmail.readonly`; тестовий OAuth режим має обмеження строку життя refresh tokens.
-4. У майстрі товару на кроці Gmail натисніть «Підключити Gmail», авторизуйте потрібну скриньку в Google, поверніться в Telegram і натисніть «Перевірити підключення».
-5. Перевірте показану email-адресу й збережіть товар. Перепідключення доступне в картці товару → Gmail OAuth; воно потребує підтвердження.
+1. Експортуйте незашифрований `.maFile` потрібного Steam-акаунта з Steam Desktop Authenticator.
+2. У майстрі товару введіть Steam login, що збігається з `account_name` у файлі.
+3. На кроці Steam Guard надішліть `.maFile` як Telegram-документ або виберіть раніше доданий акаунт.
+4. Вкажіть кількість кодів, доступних для однієї покупки.
 
-Пароль Gmail не використовується. OAuth state одноразовий, живе 10 хвилин; результат прив'язаний до конкретної спроби підключення, зашифрований і живе 30 хвилин до збереження.
-
-Парсер `app/gmail.py` шукає login-листи від `noreply@steampowered.com` із зазначеним Steam login, новіші за оплату й `CODE_MAX_AGE` (типово 180 секунд). Коди відновлення пароля не видаються. Один і той самий лист повторно тому самому покупцю не видається. Ліміт: 30 секунд між запитами як для користувача, так і для спільного товару; максимум 10 спроб за 10 хвилин.
-
-Формат теми й тіла Steam-листів може змінюватися. Перед запуском перевірте парсер на реальному login-листі вашої скриньки; невідомий формат повертає «Новий код поки не знайдено», а не довільний код.
-
-Джерела: [Gmail server-side authorization](https://developers.google.com/workspace/gmail/api/auth/web-server), [Google OAuth web-server flow](https://developers.google.com/identity/protocols/oauth2/web-server), [Gmail API](https://developers.google.com/workspace/gmail/api/reference/rest).
+Бот зберігає лише `account_name`, SteamID і зашифрований `shared_secret`. `identity_secret`, recovery code, cookies та Steam-сесія відкидаються. Код генерується локально й змінюється кожні 30 секунд, тому час сервера має бути синхронізований через NTP.
 
 ## Робота адміністратора
 
 `/admin` доступна лише `ADMIN_ID` у приватному чаті; кожне admin-повідомлення та callback перевіряються на сервері. `/cancel` скасовує поточне введення. Чернетки автоматично закінчуються через 30 хвилин.
 
-При додаванні введіть назву один раз, ціну, необов'язкові фото й опис, Steam login/password, за бажанням підключіть Gmail, оберіть показ на головній та підтвердьте preview. Одна назва й один опис показуються в обох мовних версіях інтерфейсу. Якщо Gmail пропущено, товар можна продавати, але кнопка «Отримати код» для нього не показується. Повідомлення з введеними Steam-паролями й Monobank-токеном бот намагається видалити з чату; у preview секрети не показуються.
+При додаванні введіть назву один раз, ціну, необов'язкові фото й опис, Steam login/password, завантажте `.maFile`, задайте ліміт кодів, оберіть показ на головній та підтвердьте preview. Одна назва й один опис показуються в обох мовних версіях інтерфейсу. Повідомлення з паролем і `.maFile` бот намагається видалити з чату; у preview секрети не показуються.
 
 Редагування назви й ціни не змінює історію. Steam credentials у старих покупках показуються актуальні з товару, щоб зміна пароля не залишала покупців із непрацюючими даними. Soft-deleted товари зберігаються для покупців.
 
@@ -205,6 +195,6 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
-Тести використовують SQLite та заглушки зовнішніх API. Вони перевіряють підписи, платежі, ідемпотентність, доступ, парсер, OAuth, Telegram routing та міграції. Вони не замінюють перевірку блокувань на PostgreSQL, Redis і реального циклу Telegram → тестовий Monobank → Gmail.
+Тести використовують SQLite та заглушки зовнішніх API. Вони перевіряють підписи, платежі, ідемпотентність, доступ, `.maFile`, Telegram routing та міграції. Вони не замінюють перевірку блокувань на PostgreSQL, Redis і реального циклу Telegram → тестовий Monobank → Steam Guard.
 
-Перед прийманням на сервері пройдіть покупку у двох мовах, повтор webhook, неправильну суму, приховування купленого товару, перепідключення Gmail, блокування бота покупцем, перезапуск під час обробки платежу та відновлення backup в окрему базу.
+Перед прийманням на сервері пройдіть покупку у двох мовах, повтор webhook, неправильну суму, приховування купленого товару, імпорт тестового `.maFile`, отримання коду, блокування бота покупцем, перезапуск під час обробки платежу та відновлення backup в окрему базу.
