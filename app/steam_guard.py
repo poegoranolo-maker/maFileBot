@@ -7,6 +7,8 @@ import struct
 import time
 
 STEAM_CODE_ALPHABET = "23456789BCDFGHJKMNPQRTVWXY"
+STEAM_CODE_PERIOD = 30
+FRESH_CODE_MIN_LIFETIME = 26
 
 
 def parse_mafile(content: bytes) -> dict[str, str]:
@@ -44,7 +46,7 @@ def generate_steam_guard_code(shared_secret: str, timestamp: int | None = None) 
         secret = base64.b64decode(shared_secret, validate=True)
     except (binascii.Error, ValueError):
         raise ValueError("invalid_shared_secret") from None
-    counter = int(timestamp if timestamp is not None else time.time()) // 30
+    counter = int(timestamp if timestamp is not None else time.time()) // STEAM_CODE_PERIOD
     digest = hmac.new(secret, struct.pack(">Q", counter), hashlib.sha1).digest()
     offset = digest[-1] & 0x0F
     value = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
@@ -53,3 +55,12 @@ def generate_steam_guard_code(shared_secret: str, timestamp: int | None = None) 
         code.append(STEAM_CODE_ALPHABET[value % len(STEAM_CODE_ALPHABET)])
         value //= len(STEAM_CODE_ALPHABET)
     return "".join(code)
+
+
+def fresh_code_wait_seconds(timestamp: float | None = None) -> int:
+    """Seconds to wait until a code has at least 26 seconds of life remaining."""
+    current = timestamp if timestamp is not None else time.time()
+    age = current % STEAM_CODE_PERIOD
+    if age <= STEAM_CODE_PERIOD - FRESH_CODE_MIN_LIFETIME:
+        return 0
+    return max(1, int(STEAM_CODE_PERIOD - age) + 1)

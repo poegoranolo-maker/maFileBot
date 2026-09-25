@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import logging
@@ -25,7 +26,7 @@ from app.models import (
     User,
     now,
 )
-from app.steam_guard import generate_steam_guard_code
+from app.steam_guard import fresh_code_wait_seconds, generate_steam_guard_code
 
 log = logging.getLogger(__name__)
 SUCCESS = ("paid", "delivered")
@@ -826,7 +827,9 @@ class Shop:
                 receipt.reason = "Платіж скасовано покупцем"
             return order
 
-    async def code(self, user_id, order_id):
+    async def code(self, user_id, order_id, progress=None):
+        request_id = None
+        shared_secret = None
         async with self.sessions() as session:
             order = await session.get(Order, order_id)
             if (
@@ -870,17 +873,34 @@ class Shop:
                 await session.commit()
                 raise ShopError("error")
             try:
-                code = generate_steam_guard_code(
-                    self.vault.decrypt(authenticator.shared_secret_encrypted)
-                )
+                shared_secret = self.vault.decrypt(authenticator.shared_secret_encrypted)
             except Exception:
                 request.outcome = "error"
                 await session.commit()
                 log.warning("steam_guard_generation_failed authenticator=%s", authenticator.id)
                 raise ShopError("error") from None
-            request.outcome = "found"
+            await session.flush()
+            request_id = request.id
             await session.commit()
-            return code
+        wait_seconds = fresh_code_wait_seconds()
+        while wait_seconds > 0:
+            if progress:
+                await progress(wait_seconds)
+            await asyncio.sleep(min(3, wait_seconds))
+            wait_seconds = fresh_code_wait_seconds()
+        try:
+            code = generate_steam_guard_code(shared_secret)
+        except Exception:
+            async with self.sessions() as session, session.begin():
+                request = await session.get(MailCodeRequest, request_id)
+                if request:
+                    request.outcome = "error"
+            raise ShopError("error") from None
+        async with self.sessions() as session, session.begin():
+            request = await session.get(MailCodeRequest, request_id)
+            if request:
+                request.outcome = "found"
+        return code
 
     async def reconcile(self):
         async with self.sessions() as session:

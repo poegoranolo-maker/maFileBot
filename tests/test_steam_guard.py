@@ -5,7 +5,7 @@ import pytest
 
 from app.models import MailCodeRequest, Order, Product, SteamAuthenticator, now
 from app.services import ShopError
-from app.steam_guard import generate_steam_guard_code, parse_mafile
+from app.steam_guard import fresh_code_wait_seconds, generate_steam_guard_code, parse_mafile
 
 
 def test_parse_mafile_keeps_only_required_fields():
@@ -35,6 +35,13 @@ def test_generate_steam_guard_code_is_stable_for_time_window():
     assert generate_steam_guard_code(secret, 1_700_000_001) == "N3FRN"
 
 
+def test_fresh_code_waits_unless_at_least_26_seconds_remain():
+    assert fresh_code_wait_seconds(60) == 0
+    assert fresh_code_wait_seconds(64) == 0
+    assert fresh_code_wait_seconds(65) == 26
+    assert fresh_code_wait_seconds(89.5) == 1
+
+
 def test_parse_mafile_rejects_missing_or_invalid_secret():
     with pytest.raises(ValueError, match="shared_secret"):
         parse_mafile(b'{"account_name":"test"}')
@@ -42,7 +49,8 @@ def test_parse_mafile_rejects_missing_or_invalid_secret():
         parse_mafile(b'{"account_name":"test","shared_secret":"not-base64"}')
 
 
-async def test_shop_generates_code_only_for_order_owner_and_tracks_limit(shop):
+async def test_shop_generates_code_only_for_order_owner_and_tracks_limit(shop, monkeypatch):
+    monkeypatch.setattr("app.services.fresh_code_wait_seconds", lambda: 0)
     secret = base64.b64encode(b"01234567890123456789").decode()
     async with shop.sessions() as session, session.begin():
         authenticator = SteamAuthenticator(

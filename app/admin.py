@@ -45,7 +45,7 @@ from app.services import (
     set_setting,
     setting,
 )
-from app.steam_guard import generate_steam_guard_code, parse_mafile
+from app.steam_guard import fresh_code_wait_seconds, generate_steam_guard_code, parse_mafile
 from app.ui import (
     admin_menu,
     discounted_price_text,
@@ -363,13 +363,22 @@ def admin_router():
             await callback.answer("Акаунт не знайдено.", show_alert=True)
             return
         try:
-            code = generate_steam_guard_code(
-                shop.vault.decrypt(authenticator.shared_secret_encrypted)
-            )
+            shared_secret = shop.vault.decrypt(authenticator.shared_secret_encrypted)
         except Exception:
             log.exception("admin_steam_guard_generation_failed authenticator=%s", authenticator.id)
             await callback.answer("Не вдалося згенерувати код.", show_alert=True)
             return
+        wait_seconds = fresh_code_wait_seconds()
+        while wait_seconds > 0:
+            await render(
+                callback,
+                "⏳ <b>Чекаємо на новий Steam Guard-код</b>\n\n"
+                f"Оновлення приблизно через <b>{wait_seconds} с</b>…",
+                [],
+            )
+            await asyncio.sleep(min(3, wait_seconds))
+            wait_seconds = fresh_code_wait_seconds()
+        code = generate_steam_guard_code(shared_secret)
         await callback.message.bot.send_message(
             chat_id=callback.message.chat.id,
             text=(

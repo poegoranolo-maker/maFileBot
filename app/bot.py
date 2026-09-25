@@ -2054,8 +2054,19 @@ def create_dispatcher(shop, storage):
     async def code(callback, shop, user, lang):
         _, order_id, *source = callback.data.split(":")
         purchase_target = f"purchase:{order_id}:{source[0]}" if source else f"purchase:{order_id}"
+
+        async def show_wait(wait_seconds):
+            text = (
+                "⏳ <b>Чекаємо на новий Steam Guard-код</b>\n\n"
+                f"Оновлення приблизно через <b>{wait_seconds} с</b>…"
+                if lang == "ua"
+                else "⏳ <b>Ждём новый код Steam Guard</b>\n\n"
+                f"Обновление примерно через <b>{wait_seconds} с</b>…"
+            )
+            await render(callback, text, [back(lang, purchase_target)])
+
         try:
-            steam_code = await shop.code(user.id, order_id)
+            steam_code = await shop.code(user.id, order_id, progress=show_wait)
         except ShopError as error:
             if str(error) not in {"cooldown", "code_limit", "error"}:
                 raise
