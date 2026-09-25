@@ -267,7 +267,7 @@ def persistent_menu(lang, admin=False, subscribed=False, loyalty_enabled=False):
 def admin_menu():
     rows = [
         [KeyboardButton(text="➕ Додати товар"), KeyboardButton(text="📦 Товари")],
-        [KeyboardButton(text="🔥 Головна сторінка")],
+        [KeyboardButton(text="🔑 Отримати код"), KeyboardButton(text="🔥 Головна сторінка")],
         [KeyboardButton(text="📢 Розсилка"), KeyboardButton(text="💬 Відгуки")],
         [KeyboardButton(text="⚙️ Загальні налаштування")],
         [KeyboardButton(text="⬅️ Вийти з адмінки")],

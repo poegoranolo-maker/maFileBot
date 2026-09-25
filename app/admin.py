@@ -322,6 +322,67 @@ def admin_router():
             ),
         )
 
+    async def show_steam_authenticators(event, session, page=0):
+        page_size = 8
+        query = select(SteamAuthenticator)
+        total = await session.scalar(select(func.count()).select_from(query.subquery()))
+        page = min(max(0, page), max(0, (total - 1) // page_size))
+        authenticators = (
+            await session.scalars(
+                query.order_by(SteamAuthenticator.account_name, SteamAuthenticator.id)
+                .offset(page * page_size)
+                .limit(page_size)
+            )
+        ).all()
+        rows = [
+            [(f"🔐 {item.account_name}", f"a:guard_code:{item.id}:{page}")]
+            for item in authenticators
+        ]
+        if authenticators:
+            rows.append(pagination("a:guard_list", page, total, page_size))
+        rows.append(BACK)
+        await render(
+            event,
+            "🔑 <b>Steam Guard</b>\n\nОберіть акаунт для отримання актуального коду."
+            if authenticators
+            else "Ще не підключено жодного .maFile.",
+            rows,
+        )
+
+    @router.message(F.text == "🔑 Отримати код")
+    @router.callback_query(F.data.regexp(r"^a:guard_list:\d+$"))
+    async def steam_guard_list(event, session):
+        page = int(event.data.rsplit(":", 1)[1]) if hasattr(event, "data") else 0
+        await show_steam_authenticators(event, session, page)
+
+    @router.callback_query(F.data.regexp(r"^a:guard_code:\d+:\d+$"))
+    async def admin_steam_guard_code(callback, session, shop):
+        _, _, authenticator_id, page = callback.data.split(":")
+        authenticator = await session.get(SteamAuthenticator, int(authenticator_id))
+        if not authenticator:
+            await callback.answer("Акаунт не знайдено.", show_alert=True)
+            return
+        try:
+            code = generate_steam_guard_code(
+                shop.vault.decrypt(authenticator.shared_secret_encrypted)
+            )
+        except Exception:
+            log.exception("admin_steam_guard_generation_failed authenticator=%s", authenticator.id)
+            await callback.answer("Не вдалося згенерувати код.", show_alert=True)
+            return
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=(
+                "🔑 <b>Steam Guard</b>\n\n"
+                f"👤 {escape(authenticator.account_name)}\n"
+                f"🔐 <code>{code}</code>"
+            ),
+            reply_markup=keyboard([[('📋 Копіювати код', 'copy:' + code)]]),
+            parse_mode="HTML",
+            protect_content=True,
+        )
+        await show_steam_authenticators(callback, session, int(page))
+
     @router.callback_query(F.data == "a:general_settings")
     @router.message(F.text == "⚙️ Загальні налаштування")
     async def general_settings(event, session):

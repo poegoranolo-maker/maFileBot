@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from app.i18n import tr
-from app.ui import home_rows, persistent_menu, purchase_rows
+from app.ui import admin_menu, home_rows, persistent_menu, purchase_rows
 
 
 def test_home_inline_menu_has_only_catalog_sections():
@@ -25,6 +25,11 @@ def test_account_replaces_profile_actions_in_persistent_menu():
 def test_admin_panel_stays_in_persistent_menu_for_admins():
     labels = [button.text for row in persistent_menu("ua", admin=True).keyboard for button in row]
     assert "⚙️ Адмін-панель" in labels
+
+
+def test_admin_menu_has_steam_guard_action():
+    labels = [button.text for row in admin_menu().keyboard for button in row]
+    assert "🔑 Отримати код" in labels
 
 
 def test_purchase_actions_include_steam_guard_when_available():
