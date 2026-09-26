@@ -345,9 +345,9 @@ def purchase_rows(
     )
     if authenticator_connected and code_requests_remaining > 0:
         code_target = (
-            f"code:{order.id}:{return_target.rsplit(':', 1)[1]}"
+            f"code_request:{order.id}:{return_target.rsplit(':', 1)[1]}"
             if return_target.startswith("purchases:")
-            else f"code:{order.id}"
+            else f"code_request:{order.id}"
         )
         if code_request_available is None:
             code_request_available = True

@@ -2050,6 +2050,38 @@ def create_dispatcher(shop, storage):
             ),
         )
 
+    @router.callback_query(F.data.regexp(r"^code_request:[a-f0-9]{32}(?::\d+)?$"))
+    async def confirm_code_request(callback, lang):
+        _, order_id, *source = callback.data.split(":")
+        code_target = f"code:{order_id}:{source[0]}" if source else f"code:{order_id}"
+        purchase_target = f"purchase:{order_id}:{source[0]}" if source else f"purchase:{order_id}"
+        text = (
+            "⚠️ <b>Отримати Steam Guard-код?</b>\n\n"
+            "Код дійсний лише <b>30 секунд</b>. Після підтвердження буде використано "
+            "одну доступну активацію коду.\n\n"
+            "Підтвердіть, коли будете готові одразу ввести код, або скасуйте запит."
+            if lang == "ua"
+            else "⚠️ <b>Получить код Steam Guard?</b>\n\n"
+            "Код действителен только <b>30 секунд</b>. После подтверждения будет использована "
+            "одна доступная активация кода.\n\n"
+            "Подтвердите, когда будете готовы сразу ввести код, или отмените запрос."
+        )
+        await render(
+            callback,
+            text,
+            [
+                [
+                    (
+                        "✅ Підтвердити й отримати код"
+                        if lang == "ua"
+                        else "✅ Подтвердить и получить код",
+                        code_target,
+                    )
+                ],
+                [("❌ Скасувати" if lang == "ua" else "❌ Отменить", purchase_target)],
+            ],
+        )
+
     @router.callback_query(F.data.regexp(r"^code:[a-f0-9]{32}(?::\d+)?$"))
     async def code(callback, shop, user, lang):
         _, order_id, *source = callback.data.split(":")

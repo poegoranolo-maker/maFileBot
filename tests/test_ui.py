@@ -35,7 +35,13 @@ def test_admin_menu_has_steam_guard_action():
 def test_purchase_actions_include_steam_guard_when_available():
     order = SimpleNamespace(id="order-id")
     rows = purchase_rows(order, "ua", "support", True, 3)
-    assert any(target == "code:order-id" for row in rows for _, target in row)
+    assert any(target == "code_request:order-id" for row in rows for _, target in row)
+
+
+def test_purchase_code_confirmation_preserves_purchases_page():
+    order = SimpleNamespace(id="order-id")
+    rows = purchase_rows(order, "ua", "support", True, 3, return_target="purchases:2")
+    assert any(target == "code_request:order-id:2" for row in rows for _, target in row)
 
 
 def test_alternative_activation_guide_comes_from_order_snapshot():
